@@ -9,38 +9,38 @@ from googletrans.constants import LANGUAGES
 class Translate(View):
     async def get(self, request):
         try:
-            source_language = request.GET["sl"]
-        except Exception:
-            source_language = None
-
-        try:
+            source_language = request.GET.get("sl")
             destination_language = request.GET["dl"]
             text = request.GET["text"]
-        except Exception:
+
+            async with Translator(
+                service_urls=["translate.googleapis.com"],
+                raise_exception=True,
+            ) as translator:
+                if source_language is not None:
+                    translate_result = await translator.translate(
+                        src=source_language,
+                        dest=destination_language,
+                        text=text,
+                    )
+                else:
+                    translate_result = await translator.translate(
+                        dest=destination_language,
+                        text=text,
+                    )
+
+            response = build_response(translate_result)
+
+            return JsonResponse(response)
+
+        except Exception as e:
             return JsonResponse(
-                {"details": "dl or text fields are missing."},
-                status=HTTPStatus.BAD_REQUEST,
+                {
+                    "error-type": type(e).__name__,
+                    "error": str(e),
+                },
+                status=500,
             )
-
-        async with Translator(
-            service_urls=["translate.googleapis.com"],
-            raise_exception=True,
-        ) as translator:
-            if source_language is not None:
-                translate_result = await translator.translate(
-                    src=source_language,
-                    dest=destination_language,
-                    text=text,
-                )
-            else:
-                translate_result = await translator.translate(
-                    dest=destination_language,
-                    text=text,
-                )
-
-        response = build_response(translate_result)
-
-        return JsonResponse(response)
 
 
 def build_response(translate_result):
