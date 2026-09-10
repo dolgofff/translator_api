@@ -22,7 +22,10 @@ class Translate(View):
                 status=HTTPStatus.BAD_REQUEST,
             )
 
-        async with Translator() as translator:
+        async with Translator(
+            service_urls=["translate.googleapis.com"],
+            raise_exception=True,
+        ) as translator:
             if source_language is not None:
                 translate_result = await translator.translate(
                     src=source_language,
