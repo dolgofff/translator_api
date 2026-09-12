@@ -1,4 +1,5 @@
 from http import HTTPStatus
+from urllib.parse import quote
 
 import httpx
 from django.http import JsonResponse
@@ -80,6 +81,16 @@ class Translate(View):
             requested_source_language=source_language,
         )
 
+        source_audio = build_audio_url(
+            language=detected_language,
+            text=text,
+        )
+
+        destination_audio = build_audio_url(
+            language=destination_language,
+            text=translated_text,
+        )
+
         response = {
             "source-language": detected_language,
             "source-text": text,
@@ -87,8 +98,8 @@ class Translate(View):
             "destination-text": translated_text,
             "pronunciation": {
                 "source-text-phonetic": None,
-                "source-text-audio": None,
-                "destination-text-audio": None,
+                "source-text-audio": source_audio,
+                "destination-text-audio": destination_audio,
             },
             "translations": {
                 "all-translations": None,
@@ -99,7 +110,20 @@ class Translate(View):
             "see-also": None,
         }
 
-        return JsonResponse(response)
+        return JsonResponse(
+            response,
+            json_dumps_params={"ensure_ascii": False},
+        )
+
+
+def build_audio_url(language, text):
+    return (
+        "https://translate.google.com/translate_tts"
+        f"?ie=UTF-8"
+        f"&client=gtx"
+        f"&tl={quote(language)}"
+        f"&q={quote(text)}"
+    )
 
 
 def get_detected_language(data, requested_source_language):
@@ -166,4 +190,7 @@ class Languages(View):
             if code and name:
                 languages[code] = name.lower()
 
-        return JsonResponse(languages)
+        return JsonResponse(
+            languages,
+            json_dumps_params={"ensure_ascii": False},
+        )
