@@ -1,210 +1,182 @@
+import os
 from http import HTTPStatus
+from urllib.parse import quote
 
+import httpx
 from django.http import JsonResponse
 from django.views import View
-from googletrans import Translator
-from googletrans.constants import LANGUAGES
+
+
+LINGVA_BASE_URL = os.getenv(
+    "LINGVA_BASE_URL",
+    "https://translate.jae.fi",
+).rstrip("/")
 
 
 class Translate(View):
     async def get(self, request):
-        try:
-            source_language = request.GET.get("sl")
-            destination_language = request.GET["dl"]
-            text = request.GET["text"]
+        source_language = request.GET.get("sl", "auto")
+        destination_language = request.GET.get("dl")
+        text = request.GET.get("text")
 
-            async with Translator(
-                service_urls=["translate.googleapis.com"],
-                raise_exception=True,
-            ) as translator:
-                if source_language is not None:
-                    translate_result = await translator.translate(
-                        src=source_language,
-                        dest=destination_language,
-                        text=text,
-                    )
-                else:
-                    translate_result = await translator.translate(
-                        dest=destination_language,
-                        text=text,
-                    )
-
-            response = build_response(translate_result)
-
-            return JsonResponse(response)
-
-        except Exception as e:
+        if destination_language is None or text is None:
             return JsonResponse(
-                {
-                    "error-type": type(e).__name__,
-                    "error": str(e),
-                },
-                status=500,
+                {"details": "dl or text fields are missing."},
+                status=HTTPStatus.BAD_REQUEST,
             )
 
+        encoded_text = quote(text, safe="")
 
-def build_response(translate_result):
-    source_language = translate_result.src
-    source_text = translate_result.origin
-    destination_language = translate_result.dest
-    destination_text = translate_result.text
+        url = (
+            f"{LINGVA_BASE_URL}/api/v1/"
+            f"{source_language}/"
+            f"{destination_language}/"
+            f"{encoded_text}"
+        )
 
-    phonetic = None
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                lingva_response = await client.get(url)
 
-    try:
-        phonetic = translate_result.extra_data["translation"][1][3]
-    except Exception:
-        phonetic = None
+            lingva_response.raise_for_status()
+            data = lingva_response.json()
 
-    source_text_audio = (
-        "https://translate.google.com/translate_tts?"
-        "ie=UTF-&&client=tw-ob&tl={}&q={}"
-    ).format(
-        source_language,
-        source_text,
-    )
+        except httpx.HTTPStatusError as e:
+            return JsonResponse(
+                {
+                    "error": "Lingva returned an HTTP error.",
+                    "details": str(e),
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
 
-    destination_text_audio = (
-        "https://translate.google.com/translate_tts?"
-        "ie=UTF-&&client=tw-ob&tl={}&q={}"
-    ).format(
-        destination_language,
-        destination_text,
-    )
+        except httpx.RequestError as e:
+            return JsonResponse(
+                {
+                    "error": "Could not connect to Lingva.",
+                    "details": str(e),
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
 
-    response = {
-        "source-language": source_language,
-        "source-text": source_text,
-        "destination-language": destination_language,
-        "destination-text": destination_text,
-        "pronunciation": {
-            "source-text-phonetic": phonetic,
-            "source-text-audio": source_text_audio.replace(" ", "%20"),
-            "destination-text-audio": destination_text_audio.replace(" ", "%20"),
-        },
-        "translations": build_translations(translate_result.extra_data),
-        "definitions": build_definitions(translate_result.extra_data),
-        "see-also": translate_result.extra_data["see-also"],
-    }
+        except ValueError:
+            return JsonResponse(
+                {
+                    "error": "Lingva returned invalid JSON.",
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
 
-    return response
+        if "error" in data:
+            return JsonResponse(
+                {
+                    "error": data["error"],
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
 
+        translated_text = data.get("translation")
 
-def build_translations(extra_data):
-    all_translations = []
+        if translated_text is None:
+            return JsonResponse(
+                {
+                    "error": "Lingva response does not contain translation.",
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
 
-    if extra_data["all-translations"] is not None:
-        for item in extra_data["all-translations"][0][2]:
-            all_translations.append(item[:2])
-    else:
-        all_translations = None
+        detected_language = get_detected_language(
+            data=data,
+            requested_source_language=source_language,
+        )
 
-    possible_translations = []
+        response = {
+            "source-language": detected_language,
+            "source-text": text,
+            "destination-language": destination_language,
+            "destination-text": translated_text,
+            "pronunciation": {
+                "source-text-phonetic": None,
+                "source-text-audio": None,
+                "destination-text-audio": None,
+            },
+            "translations": {
+                "all-translations": None,
+                "possible-translations": None,
+                "possible-mistakes": None,
+            },
+            "definitions": None,
+            "see-also": None,
+        }
 
-    if extra_data["possible-translations"] is not None:
-        for item in extra_data["possible-translations"][0][2]:
-            possible_translations.append(item[0])
-    else:
-        possible_translations = None
-
-    translations = {
-        "all-translations": all_translations,
-        "possible-translations": possible_translations,
-        "possible-mistakes": extra_data["possible-mistakes"],
-    }
-
-    return translations
-
-
-def build_definitions(extra_data):
-    definitions = []
-
-    part_of_speech = None
-    definition = None
-    example = None
-    other_examples = None
-    synonyms = None
-
-    if extra_data["definitions"] is not None:
-        for item in extra_data["definitions"]:
-            part_of_speech = item[0]
-
-            for in_item_1 in item[1]:
-                g_id = in_item_1[1]
-                definition = in_item_1[0]
-
-                try:
-                    example = in_item_1[2]
-                except Exception:
-                    example = None
-
-                other_examples = built_examples(
-                    extra_data["examples"],
-                    g_id,
-                )
-
-                synonyms = built_synonyms(
-                    extra_data["synonyms"],
-                    g_id,
-                )
-
-                definitions.append(
-                    {
-                        "part-of-speech": part_of_speech,
-                        "definition": definition,
-                        "example": example,
-                        "other-examples": other_examples,
-                        "synonyms": synonyms,
-                    }
-                )
-    else:
-        definitions = None
-
-    return definitions
+        return JsonResponse(response)
 
 
-def built_examples(examples, id):
-    data = []
+def get_detected_language(data, requested_source_language):
+    if requested_source_language != "auto":
+        return requested_source_language
 
-    if examples is not None:
-        for item in examples:
-            for in_item in item:
-                if id == in_item[5]:
-                    data.append(in_item[0])
+    info = data.get("info")
 
-        if data == []:
-            return None
+    if not isinstance(info, dict):
+        return "auto"
 
-        return data
+    detected = info.get("detected")
 
-    else:
-        return examples
+    if isinstance(detected, dict):
+        code = detected.get("code")
 
+        if code:
+            return code
 
-def built_synonyms(synonyms, id):
-    data = {}
-    key = ""
+    detected_source = info.get("detectedSource")
 
-    if synonyms is not None:
-        for item in synonyms:
-            for in_item in item[1]:
-                if id == in_item[1]:
-                    try:
-                        key = in_item[2][0][0]
-                    except Exception:
-                        key = ""
+    if isinstance(detected_source, str) and detected_source:
+        return detected_source
 
-                    data[key] = in_item[0]
-
-        if data == {}:
-            return None
-
-        return data
-
-    else:
-        return synonyms
+    return "auto"
 
 
 class Languages(View):
-    def get(self, request):
-        return JsonResponse(LANGUAGES)
+    async def get(self, request):
+        url = f"{LINGVA_BASE_URL}/api/v1/languages"
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                lingva_response = await client.get(url)
+
+            lingva_response.raise_for_status()
+            data = lingva_response.json()
+
+        except (httpx.HTTPError, ValueError) as e:
+            return JsonResponse(
+                {
+                    "error": "Could not load languages from Lingva.",
+                    "details": str(e),
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+
+        languages = data.get("languages")
+
+        if not isinstance(languages, list):
+            return JsonResponse(
+                {
+                    "error": "Lingva returned invalid languages response.",
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+
+        # Сохраняем старый контракт googletrans:
+        # {
+        #     "en": "english",
+        #     "ru": "russian",
+        #     ...
+        # }
+        response = {
+            language["code"]: language["name"].lower()
+            for language in languages
+            if "code" in language and "name" in language
+        }
+
+        return JsonResponse(response)
